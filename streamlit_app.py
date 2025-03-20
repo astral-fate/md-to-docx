@@ -1,118 +1,195 @@
 import streamlit as st
 import markdown
-from docx import Document
-from io import BytesIO
-import re
+from bs4 import BeautifulSoup
 import base64
+import io
+import pdfkit
+import weasyprint
+from docx import Document
+from docx.shared import RGBColor
+import re
 
-def convert_markdown_to_docx(md_text):
+def read_markdown_file(uploaded_file):
+    """Read markdown file content from uploaded file"""
+    content = uploaded_file.getvalue().decode("utf-8")
+    return content
+
+def md_to_html_with_style(md_content):
+    """Convert markdown to HTML with styling preserved"""
+    # Use extended markdown with extras for better styling
+    html = markdown.markdown(
+        md_content,
+        extensions=[
+            'markdown.extensions.extra',
+            'markdown.extensions.codehilite',
+            'markdown.extensions.tables',
+            'markdown.extensions.toc',
+            'markdown.extensions.fenced_code'
+        ]
+    )
+    
+    # Add some default CSS for styling
+    styled_html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <style>
+            body {{ font-family: Arial, sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px; }}
+            h1 {{ color: #2c3e50; border-bottom: 1px solid #eee; padding-bottom: 10px; }}
+            h2, h3, h4 {{ color: #3498db; margin-top: 30px; }}
+            pre {{ background-color: #f8f8f8; border: 1px solid #ddd; padding: 10px; border-radius: 5px; overflow-x: auto; }}
+            code {{ background-color: #f8f8f8; padding: 2px 5px; border-radius: 3px; font-family: monospace; }}
+            blockquote {{ background-color: #f9f9f9; border-left: 4px solid #ccc; padding: 10px 15px; margin: 0; }}
+            table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
+            th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+            th {{ background-color: #f2f2f2; }}
+            tr:nth-child(even) {{ background-color: #f9f9f9; }}
+            img {{ max-width: 100%; height: auto; }}
+        </style>
+    </head>
+    <body>
+        {html}
+    </body>
+    </html>
     """
-    Convert markdown text to a docx file
-    
-    Parameters:
-    md_text (str): Markdown text to convert
-    
-    Returns:
-    BytesIO: A byte stream containing the docx file
-    """
-    # Convert markdown to HTML
-    html = markdown.markdown(md_text, extensions=['tables', 'fenced_code'])
-    
-    # Create a new Document
+    return styled_html
+
+def convert_to_pdf(html_content):
+    """Convert HTML content to PDF using WeasyPrint"""
+    try:
+        pdf = weasyprint.HTML(string=html_content).write_pdf()
+        return pdf
+    except Exception as e:
+        st.error(f"Error converting to PDF: {e}")
+        return None
+
+def convert_to_docx_with_style(html_content):
+    """Convert HTML content to DOCX with styling preserved"""
+    soup = BeautifulSoup(html_content, 'html.parser')
     doc = Document()
     
-    # Split HTML by various headers and paragraphs
-    parts = re.split(r'<h(\d)>(.*?)</h\1>|<p>(.*?)</p>|<pre><code>(.*?)</code></pre>', html, flags=re.DOTALL)
-    
-    i = 0
-    while i < len(parts):
-        if parts[i] is None:
-            i += 1
+    for element in soup.body.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'pre', 'ul', 'ol', 'li', 'blockquote']):
+        tag_name = element.name
+        
+        if tag_name.startswith('h'):
+            level = int(tag_name[1])
+            heading = doc.add_heading(level=level)
+            run = heading.add_run(element.get_text())
+            if level == 1:
+                run.font.color.rgb = RGBColor(44, 62, 80)  # Dark blue
+            else:
+                run.font.color.rgb = RGBColor(52, 152, 219)  # Light blue
+                
+        elif tag_name == 'p':
+            paragraph = doc.add_paragraph()
+            run = paragraph.add_run(element.get_text())
+            
+        elif tag_name == 'pre':
+            paragraph = doc.add_paragraph()
+            code_text = element.get_text()
+            run = paragraph.add_run(code_text)
+            run.font.name = 'Courier New'
+            
+        elif tag_name in ['ul', 'ol']:
+            # Skip list containers as we'll process individual li elements
             continue
             
-        # Header
-        if parts[i].isdigit() and i + 1 < len(parts) and parts[i+1] is not None:
-            level = int(parts[i])
-            text = parts[i+1].strip()
+        elif tag_name == 'li':
+            # Check if this is inside a ul or ol
+            parent_tag = element.parent.name
+            paragraph = doc.add_paragraph(style='List Bullet' if parent_tag == 'ul' else 'List Number')
+            run = paragraph.add_run(element.get_text())
             
-            if level == 1:
-                doc.add_heading(text, 0)  # Title
-            else:
-                doc.add_heading(text, level)
-            i += 2
-            
-        # Paragraph
-        elif i + 2 < len(parts) and parts[i+2] is not None:
-            text = parts[i+2].strip()
-            doc.add_paragraph(text)
-            i += 3
-            
-        # Code block
-        elif i + 3 < len(parts) and parts[i+3] is not None:
-            code = parts[i+3].strip()
-            p = doc.add_paragraph()
-            run = p.add_run(code)
-            run.font.name = 'Courier New'
-            i += 4
-            
-        else:
-            # Handle plain text or other elements
-            if parts[i].strip():
-                doc.add_paragraph(parts[i].strip())
-            i += 1
+        elif tag_name == 'blockquote':
+            paragraph = doc.add_paragraph()
+            run = paragraph.add_run(element.get_text())
+            paragraph.style = 'Quote'
+    
+    docx_io = io.BytesIO()
+    doc.save(docx_io)
+    docx_io.seek(0)
+    return docx_io.getvalue()
 
-    # Save the document to a BytesIO object
-    docx_bytes = BytesIO()
-    doc.save(docx_bytes)
-    docx_bytes.seek(0)
-    
-    return docx_bytes
-
-def create_download_link(docx_bytes, filename="document.docx"):
-    """
-    Create a download link for the docx file
-    
-    Parameters:
-    docx_bytes (BytesIO): Byte stream containing the docx file
-    filename (str): Name of the file to download
-    
-    Returns:
-    str: HTML link to download the file
-    """
-    b64 = base64.b64encode(docx_bytes.read()).decode()
-    return f'<a href="data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{b64}" download="{filename}">Download {filename}</a>'
+def create_download_link(content, filename, text):
+    """Create a download link for the given content"""
+    b64 = base64.b64encode(content).decode()
+    href = f'<a href="data:application/octet-stream;base64,{b64}" download="{filename}">{text}</a>'
+    return href
 
 def main():
-    st.title("Markdown to DOCX Converter")
+    st.title("Markdown Converter with Style Preservation")
     
-    # Example markdown content
-    example_md = """# Sample Title
-## Heading 2
-This is a paragraph with **bold** and *italic* text.
-
-### Code Example
-```python
-def hello_world():
-    print("Hello, World!")
-```
-
-## Another Section
-- Item 1
-- Item 2
-- Item 3
-"""
+    # File upload
+    uploaded_file = st.file_uploader("Upload a Markdown file", type=["md", "markdown", "txt"])
     
-    # Create a text area for markdown input
-    md_text = st.text_area("Enter Markdown", example_md, height=300)
-    
-    # Add a button to convert markdown to docx
-    if st.button("Convert to DOCX"):
-        docx_bytes = convert_markdown_to_docx(md_text)
+    if uploaded_file is not None:
+        md_content = read_markdown_file(uploaded_file)
         
-        # Display a download link
-        st.markdown(create_download_link(docx_bytes), unsafe_allow_html=True)
+        # Show preview of uploaded content
+        with st.expander("Markdown Content Preview"):
+            st.markdown(md_content)
         
-        st.success("Conversion complete! Click the link above to download.")
+        # Output format selection
+        output_format = st.selectbox(
+            "Select output format",
+            ["HTML", "PDF", "DOCX"]
+        )
+        
+        # Style customization option
+        with st.expander("Style Customization (HTML only)"):
+            custom_css = st.text_area(
+                "Custom CSS",
+                """body { font-family: Arial, sans-serif; }
+h1 { color: #2c3e50; }
+h2, h3, h4 { color: #3498db; }""",
+                height=200
+            )
+        
+        if st.button("Convert"):
+            # First convert to HTML with styling
+            html_content = md_to_html_with_style(md_content)
+            
+            if output_format == "HTML":
+                # If custom CSS provided, replace the CSS in the HTML
+                if custom_css:
+                    html_content = re.sub(
+                        r'<style>.*?</style>',
+                        f'<style>{custom_css}</style>',
+                        html_content,
+                        flags=re.DOTALL
+                    )
+                
+                # Provide HTML for download
+                st.download_button(
+                    label="Download HTML",
+                    data=html_content,
+                    file_name=f"{uploaded_file.name.split('.')[0]}.html",
+                    mime="text/html"
+                )
+                
+                # Show HTML preview
+                with st.expander("HTML Preview"):
+                    st.components.v1.html(html_content, height=500)
+            
+            elif output_format == "PDF":
+                pdf_data = convert_to_pdf(html_content)
+                if pdf_data:
+                    st.download_button(
+                        label="Download PDF",
+                        data=pdf_data,
+                        file_name=f"{uploaded_file.name.split('.')[0]}.pdf",
+                        mime="application/pdf"
+                    )
+            
+            elif output_format == "DOCX":
+                docx_data = convert_to_docx_with_style(html_content)
+                st.download_button(
+                    label="Download DOCX",
+                    data=docx_data,
+                    file_name=f"{uploaded_file.name.split('.')[0]}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                )
 
 if __name__ == "__main__":
     main()
